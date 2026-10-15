@@ -2,8 +2,9 @@
 
 Static, browser-only tool. Drop in a ZIP, download the converted ZIP.
 
-
-- **MySQL → BigQuery:** ZIP containing a `.sql` dump → ZIP of `.csv` files + `schema/<table>.json`
+- **BigQuery CSVs → MySQL CSVs:** empty → `NULL`, `TRUE/FALSE` → `1/0`, ` UTC` dropped
+- **MySQL CSVs → BigQuery CSVs:** `NULL` / `\N` → empty; `is_` / `has_` columns holding only 1/0 → `TRUE/FALSE`
+- **MySQL `.sql` dump → BigQuery CSVs** (plus `schema/<table>.json`) also works
 
 ## Host on GitHub Pages
 1. Put `index.html` and `converter.js` in a repo (root).
