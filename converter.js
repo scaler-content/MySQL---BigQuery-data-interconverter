@@ -5,10 +5,15 @@
 
   /* ---------------------------------------------------------------- CSV */
 
-  function parseCSV(text) {
+  /** nullTokens (optional): unquoted fields equal to one of these become null. */
+  function parseCSV(text, nullTokens) {
     if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
     const rows = [];
-    let row = [], field = "", inQ = false;
+    let row = [], field = "", inQ = false, quoted = false;
+    const end = () => {
+      row.push(!quoted && nullTokens && nullTokens.indexOf(field) >= 0 ? null : field);
+      field = ""; quoted = false;
+    };
     const n = text.length;
     for (let i = 0; i < n; i++) {
       const c = text[i];
@@ -17,29 +22,30 @@
           if (text[i + 1] === '"') { field += '"'; i++; }
           else inQ = false;
         } else field += c;
-      } else if (c === '"') inQ = true;
-      else if (c === ",") { row.push(field); field = ""; }
+      } else if (c === '"') { inQ = true; quoted = true; }
+      else if (c === ",") end();
       else if (c === "\n" || c === "\r") {
         if (c === "\r" && text[i + 1] === "\n") i++;
-        row.push(field); field = "";
+        end();
         rows.push(row); row = [];
       } else field += c;
     }
-    if (field !== "" || row.length) { row.push(field); rows.push(row); }
+    if (field !== "" || quoted || row.length) { end(); rows.push(row); }
     // drop fully blank trailing lines
-    while (rows.length && rows[rows.length - 1].every((v) => v === "")) rows.pop();
+    while (rows.length && rows[rows.length - 1].every((v) => v === "" || v === null)) rows.pop();
     return rows;
   }
 
-  function csvField(v) {
-    if (v === null || v === undefined) return "";
+  function csvField(v, nullText) {
+    if (v === null || v === undefined) return nullText || "";
     v = String(v);
+    if (nullText && v === nullText) return '"' + v + '"';
     return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   }
 
-  function toCSV(header, rows) {
-    const out = [header.map(csvField).join(",")];
-    for (const r of rows) out.push(r.map(csvField).join(","));
+  function toCSV(header, rows, nullText) {
+    const out = [header.map((h) => csvField(h)).join(",")];
+    for (const r of rows) out.push(r.map((v) => csvField(v, nullText)).join(","));
     return out.join("\n") + "\n";
   }
 
@@ -153,6 +159,79 @@
       sql: out.join("\n"),
       tables: tables.map((t) => ({ name: t.name, rows: t.data.length, cols: t.cols.length })),
     };
+  }
+
+
+  /* ------------------------------ CSV <-> CSV (NULL text, booleans 1/0) */
+
+  const NULL_TOKENS = ["NULL", "\\N"];
+  const BOOL_NAME = /^(is|has|can|should|was|did|allow|enable)(d)?_|_flag$|^(active|enabled|deleted|verified)$/i;
+
+  function readCsvTable(f, nullTokens) {
+    const rows = parseCSV(f.text, nullTokens);
+    if (!rows.length) return null;
+    const header = rows[0].map((h) => String(h).trim());
+    const data = rows.slice(1).map((r) => {
+      const x = r.slice(0, header.length);
+      while (x.length < header.length) x.push(nullTokens ? null : "");
+      return x;
+    });
+    return { name: f.name, header, data };
+  }
+
+  /** BigQuery CSVs -> MySQL CSVs: empty -> NULL, TRUE/FALSE -> 1/0, drop " UTC". */
+  function bigqueryToMysqlCsv(files) {
+    const outFiles = [], tables = [];
+    for (const f of files) {
+      const t = readCsvTable(f, null);
+      if (!t) continue;
+      const isBool = t.header.map((_, i) => {
+        const vals = t.data.map((r) => r[i]).filter((v) => v !== "");
+        return vals.length > 0 && vals.every((v) => /^(true|false)$/i.test(v));
+      });
+      const out = t.data.map((r) => r.map((v, i) => {
+        if (v === "") return null;
+        if (isBool[i]) return /^true$/i.test(v) ? "1" : "0";
+        return v.replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ?(UTC|Z)$/, "$1");
+      }));
+      outFiles.push({ name: f.name + ".csv", text: toCSV(t.header, out, "NULL") });
+      tables.push({ name: t.name, rows: out.length, cols: t.header.length });
+    }
+    return { files: outFiles, tables };
+  }
+
+  /** MySQL CSVs -> BigQuery CSVs: NULL/\N -> empty, 1/0 flag columns -> TRUE/FALSE. */
+  function mysqlCsvToBigquery(files) {
+    const outFiles = [], tables = [];
+    for (const f of files) {
+      const t = readCsvTable(f, NULL_TOKENS);
+      if (!t) continue;
+      const isBool = t.header.map((h, i) => {
+        const vals = t.data.map((r) => r[i]).filter((v) => v !== null && v !== "");
+        return vals.length > 0 && BOOL_NAME.test(h) && vals.every((v) => v === "0" || v === "1");
+      });
+      const out = t.data.map((r) => r.map((v, i) =>
+        v === null ? "" : isBool[i] ? (v === "1" ? "TRUE" : "FALSE") :
+        /^0000-00-00/.test(v) ? "" : v));
+      outFiles.push({ name: f.name + ".csv", text: toCSV(t.header, out) });
+      tables.push({ name: t.name, rows: out.length, cols: t.header.length });
+    }
+    return { files: outFiles, tables };
+  }
+
+  /** Is a set of CSVs MySQL-style ("mysql") or BigQuery-style ("bq")? null if unclear. */
+  function detectCsvFlavor(files) {
+    let nulls = 0, bools = 0;
+    for (const f of files) {
+      for (const r of parseCSV(f.text, NULL_TOKENS).slice(1)) {
+        for (const v of r) {
+          if (v === null) nulls++;
+          else if (/^(true|false)$/.test(v)) bools++;
+        }
+      }
+      if (nulls) return "mysql";
+    }
+    return bools ? "bq" : null;
   }
 
   /* ------------------------------------------- MySQL dump  ->  BigQuery */
@@ -361,7 +440,8 @@
     return { files, tables: summary };
   }
 
-  const api = { parseCSV, toCSV, inferColumn, bigqueryToMysql, mysqlToBigquery, splitStatements };
+  const api = { parseCSV, toCSV, inferColumn, bigqueryToMysql, mysqlToBigquery, splitStatements,
+    bigqueryToMysqlCsv, mysqlCsvToBigquery, detectCsvFlavor };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Converter = api;
 })(typeof self !== "undefined" ? self : this);

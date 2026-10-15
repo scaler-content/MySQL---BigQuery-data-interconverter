@@ -48,7 +48,7 @@
   <div class="card">
     <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a ZIP file">
       <strong id="dropTitle">Drop a ZIP here, or click to choose</strong>
-      <small>BigQuery: ZIP of <code>.csv</code> files &nbsp;·&nbsp; MySQL: ZIP containing a <code>.sql</code> dump</small>
+      <small>ZIP of <code>.csv</code> files (BigQuery or MySQL style) &nbsp;·&nbsp; or a MySQL <code>.sql</code> dump</small>
     </div>
     <input type="file" id="file" accept=".zip,application/zip" hidden>
 
@@ -69,9 +69,10 @@
 
   <footer>
     <ul>
-      <li><b>BigQuery → MySQL:</b> one CSV per table (header row required). Column types and the primary key (first <code>*_id</code> column, if unique) are inferred from the data. Output is one <code>.sql</code> file with <code>DROP</code>/<code>CREATE</code>/<code>INSERT</code>.</li>
-      <li><b>MySQL → BigQuery:</b> reads <code>CREATE TABLE</code> and <code>INSERT</code> statements (mysqldump works). Output is one CSV per table plus <code>schema/&lt;table&gt;.json</code> for <code>bq load --schema</code>.</li>
-      <li>Foreign keys can't be inferred from CSVs, so they are not generated.</li>
+      <li><b>BigQuery → MySQL (CSV):</b> empty cells become <code>NULL</code>, <code>TRUE</code>/<code>FALSE</code> become <code>1</code>/<code>0</code>, and <code> UTC</code> is dropped from timestamps.</li>
+      <li><b>MySQL → BigQuery (CSV):</b> <code>NULL</code> and <code>\N</code> become empty cells. Columns named like <code>is_…</code>/<code>has_…</code> that only hold 1/0 become <code>TRUE</code>/<code>FALSE</code>; other 1/0 columns stay numbers.</li>
+      <li>A ZIP with a MySQL <code>.sql</code> dump also works (output: CSVs + <code>schema/&lt;table&gt;.json</code>).</li>
+      <li>Auto-detect looks for <code>NULL</code> cells (MySQL) or <code>TRUE</code>/<code>FALSE</code> (BigQuery); if unclear, choose the direction manually.</li>
     </ul>
   </footer>
 </main>
@@ -113,35 +114,49 @@
       const csvs = entries.filter((f) => /\.csv$/i.test(f.name));
       const sqls = entries.filter((f) => /\.sql$/i.test(f.name));
 
-      let dir = document.querySelector('input[name="dir"]:checked').value;
-      if (dir === "auto") {
-        if (sqls.length && !csvs.length) dir = "my2bq";
-        else if (csvs.length && !sqls.length) dir = "bq2my";
-        else throw new Error("Can't auto-detect: the ZIP must contain only .csv files (BigQuery) or only .sql files (MySQL). Pick a direction manually.");
-      }
-      const stem = file.name.replace(/\.zip$/i, "").replace(/[_ -]?(bigquery|mysql|bq)$/i, "");
-      const out = new JSZip();
-      let tables;
-
-      if (dir === "bq2my") {
-        if (!csvs.length) throw new Error("No .csv files found in the ZIP.");
-        setStatus("Converting BigQuery CSVs → MySQL…");
+      const readCsvs = async () => {
         const files = [];
         for (const e of csvs.sort((a, b) => a.name.localeCompare(b.name)))
           files.push({ name: base(e.name).replace(/\.csv$/i, ""), text: await e.async("string") });
-        const r = Converter.bigqueryToMysql(files, stem);
-        out.file(`${stem}_mysql.sql`, r.sql);
-        tables = r.tables; outName = `${stem}_mysql.zip`;
+        return files;
+      };
+      const stem = file.name.replace(/\.zip$/i, "").replace(/[_ -]?(bigquery|mysql|bq)(_csv)?(_null)?$/i, "");
+      const out = new JSZip();
+      let dir = document.querySelector('input[name="dir"]:checked').value;
+      let tables, csvFiles = null;
+
+      if (dir === "auto") {
+        if (sqls.length && !csvs.length) dir = "my2bq";
+        else if (csvs.length && !sqls.length) {
+          csvFiles = await readCsvs();
+          const flavor = Converter.detectCsvFlavor(csvFiles) ||
+            (/mysql/i.test(file.name) ? "mysql" : /(bigquery|bq)/i.test(file.name) ? "bq" : null);
+          if (!flavor) throw new Error("Couldn't tell whether these CSVs are MySQL or BigQuery style. Pick a direction manually.");
+          dir = flavor === "mysql" ? "my2bq" : "bq2my";
+        } else throw new Error("Can't auto-detect: the ZIP must contain only .csv files or only .sql files. Pick a direction manually.");
+      }
+
+      let r, suffix;
+      if (dir === "bq2my") {
+        if (!csvs.length) throw new Error("No .csv files found in the ZIP.");
+        setStatus("Converting BigQuery CSVs → MySQL CSVs…");
+        r = Converter.bigqueryToMysqlCsv(csvFiles || await readCsvs());
+        suffix = "mysql";
+      } else if (csvs.length && !sqls.length) {
+        setStatus("Converting MySQL CSVs → BigQuery CSVs…");
+        r = Converter.mysqlCsvToBigquery(csvFiles || await readCsvs());
+        suffix = "bigquery";
       } else {
-        if (!sqls.length) throw new Error("No .sql files found in the ZIP.");
+        if (!sqls.length) throw new Error("No .csv or .sql files found in the ZIP.");
         setStatus("Converting MySQL dump → BigQuery CSVs…");
         let sql = "";
         for (const e of sqls.sort((a, b) => a.name.localeCompare(b.name))) sql += (await e.async("string")) + "\n;\n";
-        const r = Converter.mysqlToBigquery(sql);
+        r = Converter.mysqlToBigquery(sql);
         if (!r.tables.length) throw new Error("No CREATE TABLE / INSERT statements found in the .sql file(s).");
-        r.files.forEach((f) => out.file(f.name, f.text));
-        tables = r.tables; outName = `${stem}_bigquery.zip`;
+        suffix = "bigquery";
       }
+      r.files.forEach((f) => out.file(f.name, f.text));
+      tables = r.tables; outName = `${stem}_${suffix}.zip`;
 
       outBlob = await out.generateAsync({ type: "blob", compression: "DEFLATE" });
       const total = tables.reduce((s, t) => s + t.rows, 0);

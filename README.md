@@ -2,7 +2,7 @@
 
 Static, browser-only tool. Drop in a ZIP, download the converted ZIP.
 
-- **BigQuery → MySQL:** ZIP of `.csv` files (one per table) → ZIP with one `.sql` file
+
 - **MySQL → BigQuery:** ZIP containing a `.sql` dump → ZIP of `.csv` files + `schema/<table>.json`
 
 ## Host on GitHub Pages
