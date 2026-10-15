@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MySQL ⇄ BigQuery Converter</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #667085; --line: #d9dde5;
+    --accent: #2563eb; --accent-text: #fff; --ok: #137a3d; --err: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #11141a; --card: #1a1f29; --text: #e8ebf0; --muted: #9aa3b2; --line: #2d3442;
+            --accent: #5b8def; --accent-text: #0b1020; --ok: #4ade80; --err: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 32px 16px 56px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 36px 16px; text-align: center;
+          cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop.over, .drop:hover { border-color: var(--accent); }
+  .drop strong { display: block; margin-bottom: 4px; }
+  .drop small, .hint { color: var(--muted); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
+  label.opt { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 10px 18px; cursor: pointer;
+           background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  #status { margin-top: 16px; min-height: 1.5em; }
+  .ok { color: var(--ok); } .err { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: .92rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  footer { margin-top: 24px; color: var(--muted); font-size: .88rem; }
+  footer li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>MySQL ⇄ BigQuery Converter</h1>
+  <p class="sub">Drop in a ZIP, get the other format back as a ZIP. Everything runs in your browser — nothing is uploaded.</p>
+
+  <div class="card">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a ZIP file">
+      <strong id="dropTitle">Drop a ZIP here, or click to choose</strong>
+      <small>BigQuery: ZIP of <code>.csv</code> files &nbsp;·&nbsp; MySQL: ZIP containing a <code>.sql</code> dump</small>
+    </div>
+    <input type="file" id="file" accept=".zip,application/zip" hidden>
+
+    <div class="row" role="radiogroup" aria-label="Direction">
+      <label class="opt"><input type="radio" name="dir" value="auto" checked> Auto-detect</label>
+      <label class="opt"><input type="radio" name="dir" value="bq2my"> BigQuery → MySQL</label>
+      <label class="opt"><input type="radio" name="dir" value="my2bq"> MySQL → BigQuery</label>
+    </div>
+
+    <div class="row">
+      <button id="go" disabled>Convert</button>
+      <button id="dl" class="ghost" disabled>Download ZIP</button>
+    </div>
+
+    <div id="status" aria-live="polite"></div>
+    <div id="result"></div>
+  </div>
+
+  <footer>
+    <ul>
+      <li><b>BigQuery → MySQL:</b> one CSV per table (header row required). Column types and the primary key (first <code>*_id</code> column, if unique) are inferred from the data. Output is one <code>.sql</code> file with <code>DROP</code>/<code>CREATE</code>/<code>INSERT</code>.</li>
+      <li><b>MySQL → BigQuery:</b> reads <code>CREATE TABLE</code> and <code>INSERT</code> statements (mysqldump works). Output is one CSV per table plus <code>schema/&lt;table&gt;.json</code> for <code>bq load --schema</code>.</li>
+      <li>Foreign keys can't be inferred from CSVs, so they are not generated.</li>
+    </ul>
+  </footer>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="converter.js"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const drop = $("drop"), fileInput = $("file"), go = $("go"), dl = $("dl"), status = $("status"), result = $("result");
+  let file = null, outBlob = null, outName = "";
+
+  const setStatus = (msg, cls) => { status.className = cls || ""; status.textContent = msg; };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  function pick(f) {
+    if (!f) return;
+    file = f; outBlob = null; dl.disabled = true; result.innerHTML = "";
+    $("dropTitle").textContent = f.name;
+    go.disabled = false;
+    setStatus("Ready — press Convert.");
+  }
+  drop.addEventListener("click", () => fileInput.click());
+  drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); } });
+  fileInput.addEventListener("change", () => pick(fileInput.files[0]));
+  ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => pick(e.dataTransfer.files[0]));
+
+  const usable = (name) => !/(^|\/)(__MACOSX|\.)/.test(name) && !name.endsWith("/");
+  const base = (p) => p.split("/").pop();
+
+  async function convert() {
+    go.disabled = true; dl.disabled = true; result.innerHTML = "";
+    setStatus("Reading ZIP…");
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const entries = Object.values(zip.files).filter((f) => usable(f.name));
+      const csvs = entries.filter((f) => /\.csv$/i.test(f.name));
+      const sqls = entries.filter((f) => /\.sql$/i.test(f.name));
+
+      let dir = document.querySelector('input[name="dir"]:checked').value;
+      if (dir === "auto") {
+        if (sqls.length && !csvs.length) dir = "my2bq";
+        else if (csvs.length && !sqls.length) dir = "bq2my";
+        else throw new Error("Can't auto-detect: the ZIP must contain only .csv files (BigQuery) or only .sql files (MySQL). Pick a direction manually.");
+      }
+      const stem = file.name.replace(/\.zip$/i, "").replace(/[_ -]?(bigquery|mysql|bq)$/i, "");
+      const out = new JSZip();
+      let tables;
+
+      if (dir === "bq2my") {
+        if (!csvs.length) throw new Error("No .csv files found in the ZIP.");
+        setStatus("Converting BigQuery CSVs → MySQL…");
+        const files = [];
+        for (const e of csvs.sort((a, b) => a.name.localeCompare(b.name)))
+          files.push({ name: base(e.name).replace(/\.csv$/i, ""), text: await e.async("string") });
+        const r = Converter.bigqueryToMysql(files, stem);
+        out.file(`${stem}_mysql.sql`, r.sql);
+        tables = r.tables; outName = `${stem}_mysql.zip`;
+      } else {
+        if (!sqls.length) throw new Error("No .sql files found in the ZIP.");
+        setStatus("Converting MySQL dump → BigQuery CSVs…");
+        let sql = "";
+        for (const e of sqls.sort((a, b) => a.name.localeCompare(b.name))) sql += (await e.async("string")) + "\n;\n";
+        const r = Converter.mysqlToBigquery(sql);
+        if (!r.tables.length) throw new Error("No CREATE TABLE / INSERT statements found in the .sql file(s).");
+        r.files.forEach((f) => out.file(f.name, f.text));
+        tables = r.tables; outName = `${stem}_bigquery.zip`;
+      }
+
+      outBlob = await out.generateAsync({ type: "blob", compression: "DEFLATE" });
+      const total = tables.reduce((s, t) => s + t.rows, 0);
+      setStatus(`Done: ${tables.length} table(s), ${total.toLocaleString()} rows → ${outName}`, "ok");
+      result.innerHTML = "<table><thead><tr><th>Table</th><th class='n'>Columns</th><th class='n'>Rows</th></tr></thead><tbody>" +
+        tables.map((t) => `<tr><td>${esc(t.name)}</td><td class="n">${t.cols}</td><td class="n">${t.rows.toLocaleString()}</td></tr>`).join("") +
+        "</tbody></table>";
+      dl.disabled = false;
+    } catch (err) {
+      setStatus(err.message || String(err), "err");
+    } finally {
+      go.disabled = false;
+    }
+  }
+
+  go.addEventListener("click", convert);
+  dl.addEventListener("click", () => {
+    if (!outBlob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(outBlob); a.download = outName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
+})();
+</script>
+</body>
+</html>
