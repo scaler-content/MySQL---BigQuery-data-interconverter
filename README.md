@@ -2,8 +2,8 @@
 
 Static, browser-only tool. Drop in a ZIP, download the converted ZIP.
 
-- **BigQuery CSVs → MySQL CSVs:** empty → `NULL`, `TRUE/FALSE` → `1/0`, ` UTC` dropped
-- **MySQL CSVs → BigQuery CSVs:** `NULL` / `\N` → empty; `is_` / `has_` columns holding only 1/0 → `TRUE/FALSE`
+- **BigQuery CSVs → MySQL CSVs:** empty → `NULL`, ` UTC` dropped; all other values (booleans like `T/F`, `Y/N`, `Yes/No`, `1/0`, `TRUE/FALSE`) copied as-is
+- **MySQL CSVs → BigQuery CSVs:** `NULL` / `\N` → empty; all other values copied as-is
 - **MySQL `.sql` dump → BigQuery CSVs** (plus `schema/<table>.json`) also works
 
 ## Host on GitHub Pages

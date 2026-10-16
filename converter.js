@@ -165,7 +165,6 @@
   /* ------------------------------ CSV <-> CSV (NULL text, booleans 1/0) */
 
   const NULL_TOKENS = ["NULL", "\\N"];
-  const BOOL_NAME = /^(is|has|can|should|was|did|allow|enable)(d)?_|_flag$|^(active|enabled|deleted|verified)$/i;
 
   function readCsvTable(f, nullTokens) {
     const rows = parseCSV(f.text, nullTokens);
@@ -179,40 +178,29 @@
     return { name: f.name, header, data };
   }
 
-  /** BigQuery CSVs -> MySQL CSVs: empty -> NULL, TRUE/FALSE -> 1/0, drop " UTC". */
+  /** BigQuery CSVs -> MySQL CSVs: empty -> NULL, " UTC" dropped. Everything else (booleans included) is kept as-is. */
   function bigqueryToMysqlCsv(files) {
     const outFiles = [], tables = [];
     for (const f of files) {
       const t = readCsvTable(f, null);
       if (!t) continue;
-      const isBool = t.header.map((_, i) => {
-        const vals = t.data.map((r) => r[i]).filter((v) => v !== "");
-        return vals.length > 0 && vals.every((v) => /^(true|false)$/i.test(v));
-      });
-      const out = t.data.map((r) => r.map((v, i) => {
-        if (v === "") return null;
-        if (isBool[i]) return /^true$/i.test(v) ? "1" : "0";
-        return v.replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ?(UTC|Z)$/, "$1");
-      }));
+      const out = t.data.map((r) => r.map((v) =>
+        v.trim() === "" ? null
+          : v.replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ?(UTC|Z)$/, "$1")));
       outFiles.push({ name: f.name + ".csv", text: toCSV(t.header, out, "NULL") });
       tables.push({ name: t.name, rows: out.length, cols: t.header.length });
     }
     return { files: outFiles, tables };
   }
 
-  /** MySQL CSVs -> BigQuery CSVs: NULL/\N -> empty, 1/0 flag columns -> TRUE/FALSE. */
+  /** MySQL CSVs -> BigQuery CSVs: NULL/\N -> empty. Values (booleans included) are kept as-is. */
   function mysqlCsvToBigquery(files) {
     const outFiles = [], tables = [];
     for (const f of files) {
       const t = readCsvTable(f, NULL_TOKENS);
       if (!t) continue;
-      const isBool = t.header.map((h, i) => {
-        const vals = t.data.map((r) => r[i]).filter((v) => v !== null && v !== "");
-        return vals.length > 0 && BOOL_NAME.test(h) && vals.every((v) => v === "0" || v === "1");
-      });
-      const out = t.data.map((r) => r.map((v, i) =>
-        v === null ? "" : isBool[i] ? (v === "1" ? "TRUE" : "FALSE") :
-        /^0000-00-00/.test(v) ? "" : v));
+      const out = t.data.map((r) => r.map((v) =>
+        v === null || /^0000-00-00/.test(v) ? "" : v));
       outFiles.push({ name: f.name + ".csv", text: toCSV(t.header, out) });
       tables.push({ name: t.name, rows: out.length, cols: t.header.length });
     }

@@ -69,8 +69,8 @@
 
   <footer>
     <ul>
-      <li><b>BigQuery → MySQL (CSV):</b> empty cells become <code>NULL</code>, <code>TRUE</code>/<code>FALSE</code> become <code>1</code>/<code>0</code>, and <code> UTC</code> is dropped from timestamps.</li>
-      <li><b>MySQL → BigQuery (CSV):</b> <code>NULL</code> and <code>\N</code> become empty cells. Columns named like <code>is_…</code>/<code>has_…</code> that only hold 1/0 become <code>TRUE</code>/<code>FALSE</code>; other 1/0 columns stay numbers.</li>
+      <li><b>BigQuery → MySQL (CSV):</b> empty cells become <code>NULL</code> and <code> UTC</code> is dropped from timestamps. Every other value, including booleans (<code>TRUE/FALSE</code>, <code>T/F</code>, <code>Y/N</code>, <code>Yes/No</code>, <code>1/0</code>), is copied exactly as it is.</li>
+      <li><b>MySQL → BigQuery (CSV):</b> <code>NULL</code> and <code>\N</code> become empty cells. All other values are copied exactly as they are.</li>
       <li>A ZIP with a MySQL <code>.sql</code> dump also works (output: CSVs + <code>schema/&lt;table&gt;.json</code>).</li>
       <li>Auto-detect looks for <code>NULL</code> cells (MySQL) or <code>TRUE</code>/<code>FALSE</code> (BigQuery); if unclear, choose the direction manually.</li>
     </ul>
